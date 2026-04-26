@@ -17,7 +17,6 @@ import com.gregtechceu.gtceu.config.ConfigHolder;
 
 import net.minecraftforge.registries.ForgeRegistries;
 
-import com.mojang.datafixers.util.Either;
 import it.unimi.dsi.fastutil.objects.ObjectArrayList;
 import org.jetbrains.annotations.*;
 
@@ -156,12 +155,19 @@ public final class RecipeDB {
      * @param branch     the branch containing the nodes
      * @return the nodes to search for the ingredient
      */
-    private static @NotNull Map<AbstractMapIngredient, Either<GTRecipe, Branch>> nodesForIngredient(@NotNull AbstractMapIngredient ingredient,
-                                                                                                    @NotNull Branch branch) {
+    private static @Nullable Map<AbstractMapIngredient, RecipeNode> nodesForIngredient(@NotNull AbstractMapIngredient ingredient,
+                                                                                        @NotNull Branch branch,
+                                                                                        boolean create) {
         if (ingredient.isSpecialIngredient()) {
-            return branch.getSpecialNodes();
+            if (create) {
+                return branch.getSpecialNodes();
+            }
+            return branch.getSpecialNodesIfPresent();
         }
-        return branch.getNodes();
+        if (create) {
+            return branch.getNodes();
+        }
+        return branch.getNodesIfPresent();
     }
 
     /**
@@ -203,23 +209,23 @@ public final class RecipeDB {
         boolean lastIngredient = index == ingredients.size() - 1;
         var current = ingredients.get(index);
         for (AbstractMapIngredient ingredient : current) {
-            var nodes = nodesForIngredient(ingredient, branch);
-            var either = nodes.compute(ingredient, (k, v) -> {
+            var nodes = nodesForIngredient(ingredient, branch, true);
+            var node = nodes.compute(ingredient, (k, v) -> {
                 if (lastIngredient) {
                     // last ingredient
                     if (v == null) {
                         // no existing leaf, add the recipe
-                        return Either.left(recipe);
+                        return RecipeNode.recipe(recipe);
                     }
-                    if (v.left().isEmpty() || !v.left().get().equals(recipe)) {
+                    if (v.recipe == null || !v.recipe.equals(recipe)) {
                         // empty recipe or different recipe exists already, conflict
                         if (ConfigHolder.INSTANCE.dev.debug || GTCEu.isDev()) {
                             GTCEu.LOGGER.warn(
                                     "Recipe duplicate or conflict found in GTRecipeType {} and was not added. See next lines for details",
                                     ForgeRegistries.RECIPE_TYPES.getKey(recipe.getType()));
-                            if (v.left().isPresent()) {
+                            if (v.recipe != null) {
                                 GTCEu.LOGGER.warn("Attempted to add GTRecipe: {}, which conflicts with {}",
-                                        recipe.getId(), v.left().get().getId());
+                                        recipe.getId(), v.recipe.getId());
                             } else {
                                 GTCEu.LOGGER.warn("Attempted to add GTRecipe: {}, without exact duplicate/conflict",
                                         recipe.getId());
@@ -232,27 +238,25 @@ public final class RecipeDB {
                     return v;
                 }
                 // if there is an existing ingredient, use it, otherwise create a new branch for the ingredient
-                return Objects.requireNonNullElseGet(v, () -> Either.right(new Branch()));
+                return Objects.requireNonNullElseGet(v, () -> RecipeNode.branch(new Branch()));
             });
-            if (either.left().isPresent()) {
-                if (either.left().get() == recipe) {
+            if (node.recipe != null) {
+                if (node.recipe == recipe) {
                     // recipe was successfully added, continue to add the other paths
                     continue;
                 }
                 // there was already a recipe here, fail on the conflict
                 return false;
             }
-            boolean added = either.right()
-                    .filter(b -> addRecursive(recipe, ingredients, b, index + 1))
-                    .isPresent();
+            boolean added = node.branch != null && addRecursive(recipe, ingredients, node.branch, index + 1);
             if (!added) {
                 if (lastIngredient) {
                     // remove the recipe
                     nodes.remove(ingredient);
                 } else {
                     var child = nodes.get(ingredient);
-                    if (child != null && child.right().isPresent()) {
-                        var childBranch = child.right().get();
+                    if (child != null && child.branch != null) {
+                        var childBranch = child.branch;
                         if (childBranch.isEmptyBranch()) {
                             // remove the branch if it was the only thing in it
                             nodes.remove(ingredient);
@@ -265,26 +269,17 @@ public final class RecipeDB {
         return true;
     }
 
-    private static class SearchFrame {
-
-        int index;           // ingredient slot we’re exploring
-        int ingredientIndex; // position within ingredients[index]
-        Branch branch;       // branch in the recipe DB
-
-        public SearchFrame(int index, Branch branch) {
-            this.index = index;
-            this.ingredientIndex = 0;
-            this.branch = branch;
-        }
-    }
-
     public static class RecipeIterator implements Iterator<GTRecipe> {
 
         private final @NotNull RecipeDB db;
-        private final @NotNull List<List<AbstractMapIngredient>> ingredients;
+        private final @NotNull List<AbstractMapIngredient>[] ingredientSlots;
+        private final int[] slotSizes;
         private final @NotNull Predicate<GTRecipe> predicate;
 
-        private final Deque<SearchFrame> stack = new ArrayDeque<>();
+        private Branch[] branchStack;
+        private int[] slotIndexStack;
+        private int[] ingredientIndexStack;
+        private int depth;
 
         private @Nullable GTRecipe nextCached = null;
         private boolean hasCached = false;
@@ -294,48 +289,80 @@ public final class RecipeDB {
                               @NotNull List<List<AbstractMapIngredient>> ingredients,
                               @NotNull Predicate<GTRecipe> predicate) {
             this.db = db;
-            this.ingredients = ingredients;
             this.predicate = predicate;
 
-            for (int i = ingredients.size() - 1; i >= 0; i--) {
-                stack.push(new SearchFrame(i, db.rootBranch));
+            int slotCount = ingredients.size();
+            //noinspection unchecked
+            this.ingredientSlots = (List<AbstractMapIngredient>[]) new List<?>[slotCount];
+            this.slotSizes = new int[slotCount];
+            for (int i = 0; i < slotCount; i++) {
+                var slot = ingredients.get(i);
+                ingredientSlots[i] = slot;
+                slotSizes[i] = slot.size();
             }
+
+            this.branchStack = new Branch[8];
+            this.slotIndexStack = new int[8];
+            this.ingredientIndexStack = new int[8];
+            reset();
+        }
+
+        private void ensureCapacity(int requiredDepth) {
+            if (requiredDepth < branchStack.length) {
+                return;
+            }
+            int newCapacity = branchStack.length;
+            while (requiredDepth >= newCapacity) {
+                newCapacity <<= 1;
+            }
+            branchStack = Arrays.copyOf(branchStack, newCapacity);
+            slotIndexStack = Arrays.copyOf(slotIndexStack, newCapacity);
+            ingredientIndexStack = Arrays.copyOf(ingredientIndexStack, newCapacity);
         }
 
         private @Nullable GTRecipe getNext() {
-            while (!stack.isEmpty()) {
-                // We stay on one frame until all ingredients have been checked
-                SearchFrame frame = stack.peek();
+            int slotCount = ingredientSlots.length;
 
-                if (frame.ingredientIndex >= ingredients.get(frame.index).size()) {
-                    stack.pop();
+            while (depth >= 0) {
+                int slotIndex = slotIndexStack[depth];
+                if (slotIndex >= slotCount) {
+                    depth--;
                     continue;
                 }
 
-                List<AbstractMapIngredient> ingredientList = ingredients.get(frame.index);
-                AbstractMapIngredient ingredient = ingredientList.get(frame.ingredientIndex);
-                // Increment candidate pos for next iteration
-                frame.ingredientIndex++;
-                var nodes = nodesForIngredient(ingredient, frame.branch);
+                int ingredientIndex = ingredientIndexStack[depth];
+                if (ingredientIndex >= slotSizes[slotIndex]) {
+                    slotIndexStack[depth] = slotIndex + 1;
+                    ingredientIndexStack[depth] = 0;
+                    continue;
+                }
+
+                ingredientIndexStack[depth] = ingredientIndex + 1;
+                AbstractMapIngredient ingredient = ingredientSlots[slotIndex].get(ingredientIndex);
+
+                var nodes = nodesForIngredient(ingredient, branchStack[depth], false);
+                if (nodes == null) {
+                    continue;
+                }
                 var result = nodes.get(ingredient);
                 if (result == null) {
                     continue;
                 }
 
-                // Option 1: It's a recipe
-                if (result.left().isPresent()) {
-                    var recipe = result.left().get();
-                    if (predicate.test(recipe)) {
-                        return recipe;
-                    }
+                var recipe = result.recipe;
+                if (recipe != null && predicate.test(recipe)) {
+                    return recipe;
                 }
 
-                // Option 2: It's a branch, dive deeper
-                result.ifRight(b -> {
-                    for (int j = ingredients.size() - 1; j >= 0; j--) {
-                        stack.push(new SearchFrame(j, b));
-                    }
-                });
+                var child = result.branch;
+                if (child != null) {
+                    int nextDepth = depth + 1;
+                    ensureCapacity(nextDepth);
+                    depth = nextDepth;
+                    branchStack[depth] = child;
+                    slotIndexStack[depth] = 0;
+                    ingredientIndexStack[depth] = 0;
+                }
             }
 
             return null; // no more recipes
@@ -362,10 +389,12 @@ public final class RecipeDB {
          * Reset the iterator
          */
         public void reset() {
-            stack.clear();
-            for (int i = ingredients.size() - 1; i >= 0; i--) {
-                stack.push(new SearchFrame(i, db.rootBranch));
-            }
+            depth = 0;
+            branchStack[0] = db.rootBranch;
+            slotIndexStack[0] = 0;
+            ingredientIndexStack[0] = 0;
+            nextCached = null;
+            hasCached = false;
         }
     }
 }
