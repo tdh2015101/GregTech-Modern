@@ -56,21 +56,20 @@ public class RecipeIteratorBenchmarkTest {
         var legacy = runBenchmark("legacy", BENCH_ROUNDS,
                 () -> new LegacyRecipeIterator(root, ingredientSpace, ALWAYS_TRUE));
 
-        GTCEu.LOGGER.info("[RecipeIteratorBenchmark] optimized: rounds={}, recipes/round={}, wall={} ms, cpu={} ms",
-                optimized.rounds,
-                optimized.recipesPerRound,
-                toMillis(optimized.wallNanos),
-                toMillis(optimized.cpuNanos));
-        GTCEu.LOGGER.info("[RecipeIteratorBenchmark] legacy: rounds={}, recipes/round={}, wall={} ms, cpu={} ms",
-                legacy.rounds,
-                legacy.recipesPerRound,
-                toMillis(legacy.wallNanos),
-                toMillis(legacy.cpuNanos));
+        System.out.println("[RecipeIteratorBenchmark] optimized: rounds=" + optimized.rounds
+                + ", recipes/round=" + optimized.recipesPerRound
+                + ", wall=" + toMillis(optimized.wallNanos)
+                + " ms, cpu=" + toMillis(optimized.cpuNanos) + " ms");
+        System.out.println("[RecipeIteratorBenchmark] legacy: rounds=" + legacy.rounds
+                + ", recipes/round=" + legacy.recipesPerRound
+                + ", wall=" + toMillis(legacy.wallNanos)
+                + " ms, cpu=" + toMillis(legacy.cpuNanos) + " ms");
 
         if (legacy.wallNanos > 0L && legacy.cpuNanos > 0L) {
-            GTCEu.LOGGER.info("[RecipeIteratorBenchmark] wall speedup: {}x, cpu speedup: {}x",
-                    round2((double) legacy.wallNanos / optimized.wallNanos),
-                    round2((double) legacy.cpuNanos / optimized.cpuNanos));
+            System.out.println("[RecipeIteratorBenchmark] wall speedup: "
+                    + round2((double) legacy.wallNanos / optimized.wallNanos)
+                    + "x, cpu speedup: "
+                    + round2((double) legacy.cpuNanos / optimized.cpuNanos) + "x");
         }
 
         helper.assertTrue(optimized.recipesPerRound == legacy.recipesPerRound,
