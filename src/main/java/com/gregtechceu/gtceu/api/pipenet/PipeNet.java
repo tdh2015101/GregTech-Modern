@@ -97,6 +97,7 @@ public abstract class PipeNet<NodeDataType> implements ITagSerializable<Compound
     protected void addNodeSilently(BlockPos nodePos, Node<NodeDataType> node) {
         this.nodeByBlockPos.put(nodePos, node);
         checkAddedInChunk(nodePos);
+        worldData.registerNodeInIndex(nodePos, this);
     }
 
     protected void addNode(BlockPos nodePos, Node<NodeDataType> node) {
@@ -108,6 +109,7 @@ public abstract class PipeNet<NodeDataType> implements ITagSerializable<Compound
     protected Node<NodeDataType> removeNodeWithoutRebuilding(BlockPos nodePos) {
         Node<NodeDataType> removedNode = this.nodeByBlockPos.remove(nodePos);
         ensureRemovedFromChunk(nodePos);
+        worldData.unregisterNodeInIndex(nodePos);
         worldData.setDirty();
         return removedNode;
     }

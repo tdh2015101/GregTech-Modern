@@ -18,6 +18,7 @@ public abstract class LevelPipeNet<NodeDataType, T extends PipeNet<NodeDataType>
     private final ServerLevel serverLevel;
     protected List<T> pipeNets = new ArrayList<>();
     protected final Map<ChunkPos, List<T>> pipeNetsByChunk = new HashMap<>();
+    private final Map<BlockPos, T> posToNet = new HashMap<>();
 
     public LevelPipeNet(ServerLevel serverLevel) {
         this.serverLevel = serverLevel;
@@ -48,6 +49,7 @@ public abstract class LevelPipeNet<NodeDataType, T extends PipeNet<NodeDataType>
         T myPipeNet = null;
         Node<NodeDataType> node = new Node<>(nodeData, openConnections, mark, isActive);
         for (Direction facing : GTUtil.DIRECTIONS) {
+            if ((openConnections & (1 << facing.ordinal())) == 0) continue;
             BlockPos offsetPos = nodePos.relative(facing);
             T pipeNet = getNetFromPos(offsetPos);
             Node<NodeDataType> secondNode = pipeNet == null ? null : pipeNet.getAllNodes().get(offsetPos);
@@ -60,7 +62,6 @@ public abstract class LevelPipeNet<NodeDataType, T extends PipeNet<NodeDataType>
                     myPipeNet.uniteNetworks(pipeNet);
                 }
             }
-
         }
         if (myPipeNet == null) {
             myPipeNet = createNetInstance();
@@ -110,12 +111,7 @@ public abstract class LevelPipeNet<NodeDataType, T extends PipeNet<NodeDataType>
     }
 
     public T getNetFromPos(BlockPos blockPos) {
-        List<T> pipeNetsInChunk = pipeNetsByChunk.getOrDefault(new ChunkPos(blockPos), Collections.emptyList());
-        for (T pipeNet : pipeNetsInChunk) {
-            if (pipeNet.containsNode(blockPos))
-                return pipeNet;
-        }
-        return null;
+        return posToNet.get(blockPos);
     }
 
     protected void addPipeNet(T pipeNet) {
@@ -125,12 +121,23 @@ public abstract class LevelPipeNet<NodeDataType, T extends PipeNet<NodeDataType>
     protected void addPipeNetSilently(T pipeNet) {
         this.pipeNets.add(pipeNet);
         pipeNet.getContainedChunks().forEach(chunkPos -> addPipeNetToChunk(chunkPos, pipeNet));
+        pipeNet.getAllNodes().keySet().forEach(pos -> posToNet.put(pos, pipeNet));
         pipeNet.isValid = true;
+    }
+
+    @SuppressWarnings("unchecked")
+    void registerNodeInIndex(BlockPos pos, PipeNet<NodeDataType> net) {
+        posToNet.put(pos, (T) net);
+    }
+
+    void unregisterNodeInIndex(BlockPos pos) {
+        posToNet.remove(pos);
     }
 
     protected void removePipeNet(T pipeNet) {
         this.pipeNets.remove(pipeNet);
         pipeNet.getContainedChunks().forEach(chunkPos -> removePipeNetFromChunk(chunkPos, pipeNet));
+        pipeNet.getAllNodes().keySet().forEach(posToNet::remove);
         pipeNet.isValid = false;
         setDirty();
     }
